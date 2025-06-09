@@ -1,0 +1,135 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <DHT.h>
+
+// === CONFIGURAÇÕES ===
+#define ID "equipe 40-33"
+#define DHTPIN 18
+#define DHTTYPE DHT11
+#define LED_PIN 21
+#define INTERVALO_ENVIO_MS 10000  // 10 minutos em milissegundos
+
+// === STRUCT DE DADOS ===
+typedef struct dados_esp {
+  char id[30];
+  int dado01;
+  int dado02;
+  int dado03;
+  int dado04;
+  int dado05;
+} dados_esp;
+
+// === VARIÁVEIS GLOBAIS ===
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+dados_esp dadosRecebidos;
+String ultimoIDRecebido = "";
+unsigned long ultimoTempoID = 0;
+unsigned long ultimoEnvio = 0;
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// === FUNÇÕES AUXILIARES ===
+void piscarLED(int tempo = 50) {
+  digitalWrite(LED_PIN, HIGH);
+  delay(tempo);
+  digitalWrite(LED_PIN, LOW);
+}
+
+void debugSerial(const dados_esp& dados) {
+  Serial.println("--- Dados Recebidos ---");
+  Serial.print("ID: "); Serial.println(dados.id);
+  Serial.print("dado01: "); Serial.println(dados.dado01);
+  Serial.print("dado02: "); Serial.println(dados.dado02);
+  Serial.print("dado03: "); Serial.println(dados.dado03);
+  Serial.print("dado04: "); Serial.println(dados.dado04);
+  Serial.print("dado05: "); Serial.println(dados.dado05);
+  Serial.println("------------------------\n");
+}
+
+void enviarDados(const dados_esp& pacote, bool piscarLongo = false) {
+  esp_now_send(broadcastAddress, (uint8_t *)&pacote, sizeof(pacote));
+  piscarLED(piscarLongo ? 300 : 50);
+}
+
+void montarEEnviarInternos() {
+  dados_esp dados;
+  strcpy(dados.id, ID);
+
+  float temperatura = dht.readTemperature();
+  float umidade = dht.readHumidity();
+
+  // Tratamento de erro
+  dados.dado01 = isnan(temperatura) ? 0 : (int)temperatura;
+  dados.dado02 = isnan(umidade) ? 0 : (int)umidade;
+
+  dados.dado03 = 0; // espaço para sensor extra (ex: potenciômetro)
+  dados.dado04 = 0; // espaço para sensor extra (ex: LDR)
+  dados.dado05 = 0;
+
+  enviarDados(dados, true);
+}
+
+// === CALLBACKS ESP-NOW ===
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+  memcpy(&dadosRecebidos, incomingData, sizeof(dadosRecebidos));
+  debugSerial(dadosRecebidos);
+
+  // Evita eco: só repassa se não for o mesmo ID nos últimos 1000ms
+  // Evita eco: só repassa se não for o mesmo ID nos últimos 5000ms
+if (String(dadosRecebidos.id) != ID) {
+  unsigned long agora = millis();
+  if (ultimoIDRecebido != String(dadosRecebidos.id) || (agora - ultimoTempoID > 5000)) {
+    ultimoIDRecebido = String(dadosRecebidos.id);
+    ultimoTempoID = agora;
+    enviarDados(dadosRecebidos, false);
+  }
+}
+
+}
+
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  // Callback opcional
+}
+
+// === SETUP ===
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  dht.begin();
+
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Erro ao iniciar ESP-NOW");
+    return;
+  }
+
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Erro ao adicionar peer");
+    return;
+  }
+
+  ultimoEnvio = millis(); // inicia contagem para envio interno
+}
+
+// === LOOP PRINCIPAL ===
+void loop() {
+  unsigned long agora = millis();
+
+  // Envia os próprios dados a cada 10 minutos
+  if (agora - ultimoEnvio >= INTERVALO_ENVIO_MS) {
+    montarEEnviarInternos();
+    ultimoEnvio = agora;
+  }
+
+  delay(100);
+}
